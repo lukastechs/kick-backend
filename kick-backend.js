@@ -123,8 +123,27 @@ app.get('/', (req, res) => {
     res.send('Kick Account Age Checker API is running');
 });
 
-// Kick age checker endpoint
-app.get('/api/kick', async (req, res) => {
+/ This handles the path parameter format: /api/kick/username
+app.get('/api/kick/:username', async (req, res) => {
+    const username = req.params.username;
+    
+    // Validate username
+    if (!isValidUsername(username)) {
+        return res.status(400).json({ error: 'Invalid username format' });
+    }
+    
+    // Redirect to the main handler with slug as query parameter
+    req.query.slug = username;
+    return handleKickRequest(req, res);
+});
+
+// Refactor your existing /api/kick route to use a shared handler
+app.get('/api/kick', (req, res) => {
+    return handleKickRequest(req, res);
+});
+
+// Shared handler function (extract your existing logic into this function)
+async function handleKickRequest(req, res) {
     const { slug, broadcaster_user_id } = req.query;
     if (!slug && !broadcaster_user_id) {
         return res.status(400).json({ error: 'Either slug or broadcaster_user_id is required' });
@@ -213,7 +232,7 @@ app.get('/api/kick', async (req, res) => {
             details: error.message || 'No additional details'
         });
     }
-});
+}
 
 // Health check endpoint
 app.get('/health', (req, res) => {

@@ -8,11 +8,15 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 3000;
 
+// -------------------------------
 // Configuration
+// -------------------------------
 const cacheDir = path.join(__dirname, 'cache', 'kick');
 const ttlSeconds = 60 * 60 * 48; // 48 hours
 
+// -------------------------------
 // Middleware
+// -------------------------------
 app.use(cors());
 app.use(express.json());
 
@@ -32,6 +36,7 @@ function sanitizeFilename(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
+// Kick docs say slugs are max 25 chars. Allow letters, numbers, underscore, hyphen
 function isValidSlug(value) {
   return /^[a-zA-Z0-9_-]{1,25}$/.test(String(value));
 }
@@ -73,10 +78,12 @@ let tokenCache = {
 };
 
 async function getKickAccessToken() {
+  // If we already have a valid token, reuse it
   if (tokenCache.accessToken && Date.now() < tokenCache.expiresAt) {
     return tokenCache.accessToken;
   }
 
+  // If env vars are missing, skip token fetching (the v2 path will still work)
   if (!process.env.KICK_CLIENT_ID || !process.env.KICK_CLIENT_SECRET) {
     console.warn('KICK_CLIENT_ID or KICK_CLIENT_SECRET missing. v1 calls will be skipped.');
     return null;
@@ -96,6 +103,7 @@ async function getKickAccessToken() {
     const { access_token, expires_in } = resp.data || {};
     if (!access_token) throw new Error('No access_token in OAuth response');
 
+    // Set expiry with a 60s safety buffer
     tokenCache.accessToken = access_token;
     tokenCache.expiresAt = Date.now() + Math.max(0, (Number(expires_in) - 60)) * 1000;
 
@@ -107,6 +115,7 @@ async function getKickAccessToken() {
       data: error.response?.data,
       message: error.message,
     });
+    // Return null so the caller can still continue with v2 only
     return null;
   }
 }
@@ -121,9 +130,12 @@ async function readCache(key) {
     if (!exists) return null;
     const raw = await fs.readFile(file, 'utf8');
     const json = JSON.parse(raw);
-    if (json && json.timestamp && Math.floor(Date.now() / 1000) - json.timestamp < ttlSeconds) {
+    if (
+      json && json.timestamp && Math.floor(Date.now() / 1000) - json.timestamp < ttlSeconds
+    ) {
       return json.data;
     }
+    // stale
     await fs.unlink(file).catch(() => {});
     return null;
   } catch (err) {
@@ -146,7 +158,7 @@ async function writeCache(key, data) {
 // Kick API calls
 // -------------------------------
 async function fetchChannelPublicV1({ slug, broadcasterUserId, token }) {
-  if (!token) return null;
+  if (!token) return null; // No token? Skip
 
   const params = {};
   if (slug) params.slug = slug;
@@ -170,17 +182,18 @@ async function fetchChannelPublicV1({ slug, broadcasterUserId, token }) {
   }
 }
 
-async function fetchChannelV2BySlug(slug) {
+async function fetchKickV2(slug) {
   try {
     const res = await axios.get(`https://kick.com/api/v2/channels/${slug}`, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'en-US,en;q=0.9',
         'Referer': `https://kick.com/${slug}`,
-        'Origin': 'https://kick.com'
+        'Origin': 'https://kick.com',
+        'Connection': 'keep-alive'
       },
-      timeout: 7000
     });
     return res.data;
   } catch (err) {
@@ -199,6 +212,7 @@ async function fetchChannelV2BySlug(slug) {
 async function handleKickRequest(req, res) {
   const { slug: rawSlug, broadcaster_user_id: rawBroadcasterUserId } = req.query;
 
+  // Basic validation
   const slug = rawSlug ? String(rawSlug).trim() : null;
   const broadcasterUserId = rawBroadcasterUserId ? String(rawBroadcasterUserId).trim() : null;
 
@@ -212,13 +226,20 @@ async function handleKickRequest(req, res) {
 
   try {
     await ensureCacheDir();
+
+    // Determine the cache key (prefer slug if present)
     const cacheKey = (slug || broadcasterUserId).toLowerCase();
+
+    // Check cache first
     const cached = await readCache(cacheKey);
     if (cached) {
       return res.json({ data: cached, cached: true });
     }
 
+    // Step 1: Get OAuth token for v1 (may be null if env not set or endpoint down)
     const token = await getKickAccessToken();
+
+    // Step 2: If we only have broadcaster_user_id, resolve slug with v1
     let resolvedSlug = slug || null;
     let v1 = null;
 
@@ -230,45 +251,61 @@ async function handleKickRequest(req, res) {
       resolvedSlug = v1.slug;
     }
 
+    // Step 3: Call v2 with slug to get verified/followers/description/created_at etc.
     if (!resolvedSlug) {
       return res.status(404).json({ error: 'Channel not found' });
     }
 
-    const v2 = await fetchChannelV2BySlug(resolvedSlug);
+    const v2 = await fetchKickV2(resolvedSlug); // Fixed: Changed from fetchChannelV2BySlug to fetchKickV2
 
     if (!v1) {
+      // If we already didn't call v1 above, try to call it now (non-fatal if it fails)
       v1 = await fetchChannelPublicV1({ slug: resolvedSlug, broadcasterUserId: null, token });
     }
 
+    // If both v1 and v2 failed, bail out
     if (!v2 && !v1) {
       return res.status(404).json({ error: `User ${resolvedSlug} not found` });
     }
 
+    // Extract fields
     const createdAt = v2?.chatroom?.created_at || null;
     const ageDays = calculateAgeDays(createdAt);
 
     const data = {
+      // Identifiers
       slug: resolvedSlug,
       channel_id: v2?.id ?? null,
       user_id: v2?.user_id ?? null,
+
+      // Core display fields
       username: v2?.user?.username ?? resolvedSlug,
       description: v2?.user?.bio ?? v1?.channel_description ?? null,
       avatar: v2?.user?.profile_pic ?? null,
+
+      // Status & metrics
       verified: v2?.verified === true,
       followers: typeof v2?.followers_count === 'number' ? v2.followers_count : null,
       is_banned: v2?.is_banned === true,
+
+      // Live + category
       category: v1?.category?.name ?? (Array.isArray(v2?.recent_categories) && v2.recent_categories.length ? v2.recent_categories[0].name : null),
       is_live: typeof v1?.stream?.is_live === 'boolean' ? v1.stream.is_live : Boolean(v2?.livestream),
       stream_title: v1?.stream_title ?? v2?.livestream?.session_title ?? null,
-      channel_created_at: createdAt,
+
+      // Creation & age
+      channel_created_at: createdAt, // raw ISO string from v2.chatroom.created_at
       estimated_creation_date: toLocalDateString(createdAt),
       account_age: calculateAccountAge(createdAt),
       age_days: ageDays,
       estimation_confidence: createdAt ? 'High (derived from chatroom.created_at)' : 'Unknown',
       accuracy_range: createdAt ? 'Exact (channel chatroom creation)' : 'Unknown',
+
+      // Convenience link
       visit_profile: `https://kick.com/${resolvedSlug}`,
     };
 
+    // Save to cache and return
     await writeCache(cacheKey, data);
     return res.json({ data, cached: false });
   } catch (error) {
@@ -296,16 +333,19 @@ app.get('/', (req, res) => {
   res.send('Kick Account Age Checker API is running');
 });
 
+// Path parameter route: /api/kick/:username
 app.get('/api/kick/:username', async (req, res) => {
   const username = String(req.params.username || '').trim();
   if (!username) return res.status(400).json({ error: 'Missing username' });
   if (!isValidSlug(username)) return res.status(400).json({ error: 'Invalid username format' });
-  req.query.slug = username;
+  req.query.slug = username; // forward as query to the shared handler
   return handleKickRequest(req, res);
 });
 
+// Query parameter route: /api/kick?slug=username or /api/kick?broadcaster_user_id=123
 app.get('/api/kick', (req, res) => handleKickRequest(req, res));
 
+// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });

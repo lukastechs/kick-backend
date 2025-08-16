@@ -85,7 +85,7 @@ async function getKickAccessToken() {
 
   // If env vars are missing, skip token fetching (the v2 path will still work)
   if (!process.env.KICK_CLIENT_ID || !process.env.KICK_CLIENT_SECRET) {
-    console.warn('KICK_CLIENT_ID or KICK_CLIENT_SECRET missing. v1 calls will be skipped.');
+    console.warn('KICK_CLIENT_ID or KICK_CLIENT_SECRET missing. v1 calls will be attempted without auth.');
     return null;
   }
 
@@ -163,18 +163,21 @@ async function fetchChannelPublicV1({ slug, broadcasterUserId, token }) {
   if (broadcasterUserId) params.broadcaster_user_id = broadcasterUserId;
 
   try {
-    const headers = {};
+    const headers = {
+      'Accept': '*/*',
+      'Accept-Language': 'en-US'
+    };
     if (token) headers.Authorization = `Bearer ${token}`;
 
-    const resp = await axios.get('https://kick.com/api/v1/channels/' + (slug || broadcasterUserId), {
+    const resp = await axios.get('https://api.kick.com/public/v1/channels', {
       params,
       headers,
       timeout: 7000,
     });
-    const data = resp.data;
-    return data || null;
+    const arr = resp.data?.data;
+    return Array.isArray(arr) && arr.length ? arr[0] : null;
   } catch (error) {
-    console.error('v1 /channels error:', {
+    console.error('Public v1 /channels error:', {
       status: error.response?.status,
       data: error.response?.data,
       message: error.message,
@@ -184,34 +187,48 @@ async function fetchChannelPublicV1({ slug, broadcasterUserId, token }) {
 }
 
 async function fetchKickV2(slug) {
-  try {
-    const res = await axios.get(`https://kick.com/api/v2/channels/${slug}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US',
-        'Referer': `https://kick.com/${slug}`,
-        'Origin': 'https://kick.com',
-        'Connection': 'keep-alive',
-        'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="127", "Google Chrome";v="127"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin'
-      },
-      timeout: 7000,
-      maxRedirects: 5, // Handle potential redirects
-      validateStatus: status => status >= 200 && status < 400 // Accept 3xx as success
-    });
-    return res.data;
-  } catch (err) {
-    console.error("v2 /channels/{slug} error:", {
-      status: err.response?.status,
-      data: err.response?.data,
-      message: err.message,
-    });
-    return null;
+  const url = `https://kick.com/api/v2/channels/${slug}`;
+  if (process.env.ZENROWS_APIKEY) {
+    const zenUrl = `https://api.zenrows.com/v1/?apikey=${process.env.ZENROWS_APIKEY}&url=${encodeURIComponent(url)}&js_render=true&antibot=true&premium_proxy=true`;
+    try {
+      const res = await axios.get(zenUrl, { timeout: 10000 });
+      return res.data; // ZenRows returns the raw JSON content
+    } catch (err) {
+      console.error('ZenRows v2 proxy error:', {
+        status: err.response?.status,
+        data: err.response?.data,
+        message: err.message,
+      });
+      return null;
+    }
+  } else {
+    try {
+      const res = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/plain, */*',
+          'Accept-Language': 'en-US',
+          'Referer': `https://kick.com/${slug}`,
+          'Origin': 'https://kick.com',
+          'Connection': 'keep-alive',
+          'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="127", "Google Chrome";v="127"',
+          'Sec-Ch-Ua-Mobile': '?0',
+          'Sec-Ch-Ua-Platform': '"Windows"',
+          'Sec-Fetch-Dest': 'empty',
+          'Sec-Fetch-Mode': 'cors',
+          'Sec-Fetch-Site': 'same-origin'
+        },
+        timeout: 7000,
+      });
+      return res.data;
+    } catch (err) {
+      console.error('Direct v2 /channels/{slug} error:', {
+        status: err.response?.status,
+        data: err.response?.data,
+        message: err.message,
+      });
+      return null;
+    }
   }
 }
 
@@ -293,7 +310,7 @@ async function handleKickRequest(req, res) {
       avatar: v2?.user?.profile_pic ?? v1?.profilepic ?? 'https://via.placeholder.com/50',
 
       // Status & metrics
-      verified: v2?.verified === true ? 'Yes' : 'No',
+      verified: v2?.verified === true ? 'Yes' : (v1?.verified ? 'Yes' : 'No'),
       followers: typeof v2?.followers_count === 'number' ? v2.followers_count : (v1?.followers_count || 0),
       is_banned: v2?.is_banned === true ? 'Yes' : 'No',
 
@@ -328,7 +345,7 @@ async function handleKickRequest(req, res) {
       return res.status(429).json({ error: 'Rate limit exceeded. Please wait a few minutes and try again.' });
     }
     if (error.response?.status === 401) {
-      return res.status(401).json({ error: 'Invalid or missing API token' });
+      return res.status(401).json({ error: 'Invalid or missing API token. Check your KICK_CLIENT_ID and KICK_CLIENT_SECRET, or register at https://dev.kick.com for valid credentials.' });
     }
 
     return res.status(500).json({ error: 'Failed to fetch Kick data', details: error.message || 'No additional details' });

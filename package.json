@@ -1,17 +1,15 @@
 {
   "name": "kick-age-checker-backend",
   "version": "1.0.0",
+  "private": true,
   "main": "kick-backend.js",
   "scripts": {
     "start": "node kick-backend.js"
   },
   "dependencies": {
-    "axios": "^1.7.2",
+    "axios": "^1.7.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2"
-  },
-  "engines": {
-    "node": ">=16.6.0"
   }
 }

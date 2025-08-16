@@ -118,31 +118,7 @@ async function saveToCache(username, data) {
     }
 }
 
-// Root endpoint
-app.get('/', (req, res) => {
-    res.send('Kick Account Age Checker API is running');
-});
-
-/ This handles the path parameter format: /api/kick/username
-app.get('/api/kick/:username', async (req, res) => {
-    const username = req.params.username;
-    
-    // Validate username
-    if (!isValidUsername(username)) {
-        return res.status(400).json({ error: 'Invalid username format' });
-    }
-    
-    // Redirect to the main handler with slug as query parameter
-    req.query.slug = username;
-    return handleKickRequest(req, res);
-});
-
-// Refactor your existing /api/kick route to use a shared handler
-app.get('/api/kick', (req, res) => {
-    return handleKickRequest(req, res);
-});
-
-// Shared handler function (extract your existing logic into this function)
+// Shared handler function for Kick API requests
 async function handleKickRequest(req, res) {
     const { slug, broadcaster_user_id } = req.query;
     if (!slug && !broadcaster_user_id) {
@@ -233,6 +209,30 @@ async function handleKickRequest(req, res) {
         });
     }
 }
+
+// Root endpoint
+app.get('/', (req, res) => {
+    res.send('Kick Account Age Checker API is running');
+});
+
+// Path parameter route: /api/kick/username
+app.get('/api/kick/:username', async (req, res) => {
+    const username = req.params.username;
+    
+    // Validate username
+    if (!isValidUsername(username)) {
+        return res.status(400).json({ error: 'Invalid username format' });
+    }
+    
+    // Set slug as query parameter and call the shared handler
+    req.query.slug = username;
+    return handleKickRequest(req, res);
+});
+
+// Query parameter route: /api/kick?slug=username or /api/kick?broadcaster_user_id=123
+app.get('/api/kick', (req, res) => {
+    return handleKickRequest(req, res);
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {

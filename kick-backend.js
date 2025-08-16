@@ -63,12 +63,12 @@ function calculateAgeDays(createdAt) {
 // Generate Kick Access Token
 async function getKickAccessToken() {
     try {
-        const response = await axios.post('https://id.kick.com/oauth/token', {
+        const response = await axios.post('https://kick.com/api/v1/auth/refresh', {
             client_id: clientId,
             client_secret: clientSecret,
             grant_type: 'client_credentials'
         }, {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            headers: { 'Content-Type': 'application/json' },
             timeout: 5000
         });
 
@@ -144,7 +144,7 @@ app.get('/api/kick/:username', async (req, res) => {
         await ensureCacheDir();
 
         // Check cache
-        const cacheResult = await checkCache(username.toLowerCase()); // Normalize to lowercase for cache
+        const cacheResult = await checkCache(username.toLowerCase());
         if (cacheResult.cached) {
             return res.json({ data: cacheResult.data, cached: true });
         }
@@ -155,11 +155,14 @@ app.get('/api/kick/:username', async (req, res) => {
         // Fetch from Kick API (try original case first)
         let response;
         try {
-            response = await axios.get(`https://api.kick.com/public/v1/channels/${encodeURIComponent(username)}`, {
+            response = await axios.get('https://api.kick.com/public/v1/channels', {
+                params: {
+                    slug: username
+                },
                 headers: {
                     'Client-ID': clientId,
                     'Authorization': `Bearer ${token}`,
-                    'Accept': '*/*'
+                    'Accept': 'application/json'
                 },
                 timeout: 5000
             });
@@ -167,27 +170,35 @@ app.get('/api/kick/:username', async (req, res) => {
             if (error.response?.status === 404) {
                 // Retry with lowercase username
                 console.log(`Retrying with lowercase username: ${username.toLowerCase()}`);
-                response = await axios.get(`https://api.kick.com/public/v1/channels/${encodeURIComponent(username.toLowerCase())}`, {
+                response = await axios.get('https://api.kick.com/public/v1/channels', {
+                    params: {
+                        slug: username.toLowerCase()
+                    },
                     headers: {
                         'Client-ID': clientId,
                         'Authorization': `Bearer ${token}`,
-                        'Accept': '*/*'
+                        'Accept': 'application/json'
                     },
                     timeout: 5000
                 });
             } else {
-                throw error; // Rethrow non-404 errors
+                throw error;
             }
         }
 
-        const user = response.data;
-        if (!user || !user.created_at) {
+        // Check if we got any data
+        if (!response.data.data || response.data.data.length === 0) {
+            return res.status(404).json({ error: `User ${username} not found` });
+        }
+
+        const user = response.data.data[0];
+        if (!user.created_at) {
             return res.status(404).json({ error: `User ${username} not found` });
         }
 
         const kickData = {
-            username: user.user?.username || username,
-            nickname: user.user?.display_name || user.user?.username || username,
+            username: user.slug || username,
+            nickname: user.user?.username || username,
             estimated_creation_date: new Date(user.created_at).toLocaleDateString(),
             account_age: calculateAccountAge(user.created_at),
             age_days: calculateAgeDays(user.created_at),
@@ -195,13 +206,13 @@ app.get('/api/kick/:username', async (req, res) => {
             verified: user.verified ? 'Yes' : 'No',
             description: user.bio || 'N/A',
             user_id: user.id || user.user?.id || 'N/A',
-            avatar: user.profilepic || 'https://via.placeholder.com/50',
+            avatar: user.profile_pic || 'https://via.placeholder.com/50',
             estimation_confidence: 'High',
             accuracy_range: 'Exact',
-            visit_profile: `https://kick.com/${username}`
+            visit_profile: `https://kick.com/${user.slug || username}`
         };
 
-        // Save to cache (use lowercase username for consistency)
+        // Save to cache
         await saveToCache(username.toLowerCase(), kickData);
 
         res.json({ data: kickData, cached: false });

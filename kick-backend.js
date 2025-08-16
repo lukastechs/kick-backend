@@ -11,8 +11,6 @@ const port = process.env.PORT || 3000;
 // Configuration
 const cacheDir = path.join(__dirname, 'cache', 'kick');
 const ttl = 172800; // 48 hours in seconds
-const clientId = process.env.KICK_CLIENT_ID || '01K2NS71Z9WNS3VK0C18XS5S1Q';
-const clientSecret = process.env.KICK_CLIENT_SECRET || '08d2dd793f06e740656003612f903408610e7637f2f21d9cf7f6ef930b163b23';
 
 // Middleware
 app.use(cors());
@@ -28,17 +26,17 @@ async function ensureCacheDir() {
     }
 }
 
-// Sanitize filename
+// Sanitize filename (preserve case, remove invalid characters)
 function sanitizeFilename(username) {
     return username.replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
-// Validate username format
+// Validate username format (1-20 characters, letters, numbers, underscores, hyphens)
 function isValidUsername(username) {
     return /^[a-zA-Z0-9_-]{1,20}$/.test(username);
 }
 
-// Calculate account age
+// Calculate account age in human-readable format
 function calculateAccountAge(createdAt) {
     const now = new Date();
     const created = new Date(createdAt);
@@ -60,24 +58,26 @@ function calculateAgeDays(createdAt) {
 // Generate Kick Access Token
 async function getKickAccessToken() {
     try {
-        const response = await axios.post('https://kick.com/api/v1/auth/refresh', {
-            client_id: clientId,
-            client_secret: clientSecret,
+        const response = await axios.post('https://id.kick.com/oauth/token', {
+            client_id: process.env.KICK_CLIENT_ID,
+            client_secret: process.env.KICK_CLIENT_SECRET,
             grant_type: 'client_credentials'
         }, {
-            headers: { 
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'application/json',
-                'Origin': 'https://kick.com',
-                'Referer': 'https://kick.com/'
-            },
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             timeout: 5000
         });
 
-        return response.data.access_token;
+        const { access_token, expires_in } = response.data;
+        console.log('Fetched new Kick access token');
+        return access_token;
     } catch (error) {
-        console.error('Kick Token Error:', error.response?.data || error.message);
+        console.error('Kick Token Error:', {
+            status: error.response?.status,
+            data: error.response?.data,
+            message: error.message,
+            headers: error.config?.headers,
+            url: error.config?.url
+        });
         throw new Error('Failed to generate Kick access token');
     }
 }
@@ -89,13 +89,16 @@ async function checkCache(username) {
         if (await fs.access(cacheFile).then(() => true).catch(() => false)) {
             const cacheContent = await fs.readFile(cacheFile, 'utf-8');
             const cacheData = JSON.parse(cacheContent);
-            if (cacheData && cacheData.timestamp && (Math.floor(Date.now() / 1000) - cacheData.timestamp < ttl)) {
+            if (cacheData && cacheData.timestamp && (Math.floor(Date.now() / 1000) - cacheData.timestamp) < ttl) {
+                console.log(`Cache hit for username: ${username}`);
                 return { data: cacheData.data, cached: true };
+            } else {
+                console.log(`Cache expired or invalid for username: ${username}`);
+                await fs.unlink(cacheFile).catch(err => console.error(`Failed to delete expired cache file: ${cacheFile}`, err.message));
             }
-            await fs.unlink(cacheFile);
         }
     } catch (error) {
-        console.error(`Cache check error: ${error.message}`);
+        console.error(`Cache check error for username: ${username}`, error.message);
     }
     return { cached: false };
 }
@@ -103,88 +106,120 @@ async function checkCache(username) {
 // Save to cache
 async function saveToCache(username, data) {
     const cacheFile = path.join(cacheDir, `${sanitizeFilename(username)}.json`);
+    const cacheData = {
+        timestamp: Math.floor(Date.now() / 1000),
+        data
+    };
     try {
-        await fs.writeFile(cacheFile, JSON.stringify({
-            timestamp: Math.floor(Date.now() / 1000),
-            data
-        }, null, 2));
+        await fs.writeFile(cacheFile, JSON.stringify(cacheData, null, 2));
+        console.log(`Cache file saved for username: ${username}`);
     } catch (error) {
-        console.error(`Failed to save cache: ${error.message}`);
+        console.error(`Failed to save cache file: ${cacheFile}`, error.message);
     }
 }
 
+// Root endpoint
+app.get('/', (req, res) => {
+    res.send('Kick Account Age Checker API is running');
+});
+
 // Kick age checker endpoint
-app.get('/api/kick/:username', async (req, res) => {
-    const { username } = req.params;
-    
-    if (!username || !isValidUsername(username)) {
-        return res.status(400).json({ error: 'Invalid username format' });
+app.get('/api/kick', async (req, res) => {
+    const { slug, broadcaster_user_id } = req.query;
+    if (!slug && !broadcaster_user_id) {
+        return res.status(400).json({ error: 'Either slug or broadcaster_user_id is required' });
     }
 
     try {
         await ensureCacheDir();
-        const cacheResult = await checkCache(username.toLowerCase());
+
+        // Check cache
+        const cacheKey = slug ? slug.toLowerCase() : broadcaster_user_id;
+        const cacheResult = await checkCache(cacheKey);
         if (cacheResult.cached) {
             return res.json({ data: cacheResult.data, cached: true });
         }
 
+        // Fetch access token
         const token = await getKickAccessToken();
-        
-        const response = await axios.get('https://api.kick.com/public/v1/channels', {
-            params: { slug: username },
-            headers: {
-                'Client-ID': clientId,
-                'Authorization': `Bearer ${token}`,
-                'Accept': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            },
-            timeout: 5000
-        });
 
-        if (!response.data.data || response.data.data.length === 0) {
-            return res.status(404).json({ error: 'User not found' });
+        // Fetch from Kick API
+        let response;
+        const params = {};
+        if (slug) params.slug = slug;
+        if (broadcaster_user_id) params.broadcaster_user_id = broadcaster_user_id;
+
+        try {
+            response = await axios.get('https://api.kick.com/public/v1/channels', {
+                headers: {
+                    'Client-ID': process.env.KICK_CLIENT_ID,
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': '*/*'
+                },
+                params: params,
+                timeout: 5000
+            });
+        } catch (error) {
+            if (error.response?.status === 404) {
+                return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
+            }
+            throw error;
         }
 
-        const user = response.data.data[0];
+        const user = response.data.data[0]; // Assuming the response returns an array under 'data'
+        if (!user || !user.created_at) {
+            return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
+        }
+
         const kickData = {
-            username: user.slug,
-            nickname: user.user?.username || user.slug,
+            username: user.user?.username || (slug || broadcaster_user_id),
+            nickname: user.user?.display_name || user.user?.username || (slug || broadcaster_user_id),
             estimated_creation_date: new Date(user.created_at).toLocaleDateString(),
             account_age: calculateAccountAge(user.created_at),
             age_days: calculateAgeDays(user.created_at),
             followers: user.followers_count || 0,
             verified: user.verified ? 'Yes' : 'No',
             description: user.bio || 'N/A',
-            user_id: user.id || 'N/A',
-            avatar: user.profile_pic || 'https://via.placeholder.com/50',
-            visit_profile: `https://kick.com/${user.slug}`
+            user_id: user.id || user.user?.id || 'N/A',
+            avatar: user.profilepic || 'https://via.placeholder.com/50',
+            estimation_confidence: 'High',
+            accuracy_range: 'Exact',
+            visit_profile: `https://kick.com/${slug || broadcaster_user_id}`
         };
 
-        await saveToCache(username.toLowerCase(), kickData);
-        res.json({ data: kickData, cached: false });
+        // Save to cache
+        await saveToCache(cacheKey, kickData);
 
+        res.json({ data: kickData, cached: false });
     } catch (error) {
-        console.error('API Error:', error.message);
-        
+        console.error('Kick API Error:', {
+            slug,
+            broadcaster_user_id,
+            status: error.response?.status,
+            data: error.response?.data,
+            message: error.message
+        });
         if (error.response?.status === 404) {
-            return res.status(404).json({ error: 'User not found' });
+            return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
         }
         if (error.response?.status === 429) {
-            return res.status(429).json({ error: 'Rate limit exceeded' });
+            return res.status(429).json({ error: 'Rate limit exceeded. Please wait a few minutes and try again.' });
         }
-        
-        res.status(500).json({ 
-            error: 'Failed to fetch data',
-            details: error.response?.data?.error || error.message 
+        if (error.response?.status === 401) {
+            return res.status(401).json({ error: 'Invalid or missing API token' });
+        }
+        res.status(error.response?.status || 500).json({
+            error: 'Failed to fetch Kick data',
+            details: error.message || 'No additional details'
         });
     }
 });
 
-// Health check
+// Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
 app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
+    console.log(`Kick Server running on port ${port}`);
 });

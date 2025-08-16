@@ -108,21 +108,88 @@ async function handleKickRequest(req, res) {
             return res.json({ data: cacheResult.data, cached: true });
         }
 
-        // Fetch from Kick API (public endpoint - no authentication needed)
+        // Try different Kick API endpoints
         let response;
-        const params = {};
-        if (slug) params.slug = slug;
-        if (broadcaster_user_id) params.broadcaster_user_id = broadcaster_user_id;
+        let user;
 
         try {
-            response = await axios.get('https://api.kick.com/public/v1/channels', {
-                headers: {
-                    'Accept': 'application/json',
-                    'User-Agent': 'Kick-Age-Checker/1.0'
-                },
-                params: params,
-                timeout: 5000
-            });
+            // First, try the direct channel endpoint with slug
+            if (slug) {
+                console.log(`Trying direct channel endpoint for slug: ${slug}`);
+                response = await axios.get(`https://kick.com/api/v2/channels/${slug}`, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                        'Referer': 'https://kick.com/',
+                        'Origin': 'https://kick.com'
+                    },
+                    timeout: 10000
+                });
+                user = response.data;
+            } else if (broadcaster_user_id) {
+                // If we have broadcaster_user_id, we need to find the channel first
+                console.log(`Trying to find channel for broadcaster_user_id: ${broadcaster_user_id}`);
+                response = await axios.get(`https://kick.com/api/v1/channels/${broadcaster_user_id}`, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                        'Referer': 'https://kick.com/',
+                        'Origin': 'https://kick.com'
+                    },
+                    timeout: 10000
+                });
+                user = response.data;
+            }
+        } catch (firstError) {
+            console.log('First attempt failed, trying fallback endpoints:', firstError.message);
+            
+            try {
+                // Fallback: Try the private API endpoint (sometimes works without auth)
+                if (slug) {
+                    console.log(`Trying private API endpoint for slug: ${slug}`);
+                    response = await axios.get(`https://api.kick.com/private/v1/channels/${slug}`, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                            'Referer': 'https://kick.com/',
+                            'Origin': 'https://kick.com'
+                        },
+                        timeout: 10000
+                    });
+                    user = response.data;
+                }
+            } catch (secondError) {
+                console.log('Second attempt failed, trying final fallback:', secondError.message);
+                
+                try {
+                    // Final fallback: Try scraping the page directly
+                    console.log(`Trying page scraping for slug: ${slug || broadcaster_user_id}`);
+                    response = await axios.get(`https://kick.com/${slug || broadcaster_user_id}`, {
+                        headers: {
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                        },
+                        timeout: 10000
+                    });
+                    
+                    // Extract channel data from HTML
+                    const htmlContent = response.data;
+                    const channelDataMatch = htmlContent.match(/window\.__INITIAL_STATE__\s*=\s*({.*?});/s);
+                    
+                    if (channelDataMatch) {
+                        const initialState = JSON.parse(channelDataMatch[1]);
+                        user = initialState.channel?.data || initialState.channel;
+                    } else {
+                        throw new Error('Could not extract channel data from page');
+                    }
+                } catch (finalError) {
+                    if (finalError.response?.status === 404) {
+                        return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
+                    }
+                    throw finalError;
+                }
+            }
+        }
         } catch (error) {
             if (error.response?.status === 404) {
                 return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
@@ -131,33 +198,28 @@ async function handleKickRequest(req, res) {
         }
 
         // Handle the response data structure
-        const responseData = response.data;
-        let user;
-
-        // Check if response has data array or is direct channel object
-        if (responseData.data && Array.isArray(responseData.data)) {
-            user = responseData.data[0];
-        } else if (responseData.data && !Array.isArray(responseData.data)) {
-            user = responseData.data;
-        } else {
-            user = responseData;
-        }
-
-        if (!user || !user.created_at) {
+        if (!user) {
             return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
         }
+
+        // Ensure we have the created_at field
+        if (!user.created_at && !user.user?.created_at) {
+            return res.status(404).json({ error: `Account creation date not available for ${slug || broadcaster_user_id}` });
+        }
+
+        const createdAt = user.created_at || user.user?.created_at;
 
         const kickData = {
             username: user.user?.username || user.slug || (slug || broadcaster_user_id),
             nickname: user.user?.display_name || user.user?.username || user.slug || (slug || broadcaster_user_id),
-            estimated_creation_date: new Date(user.created_at).toLocaleDateString(),
-            account_age: calculateAccountAge(user.created_at),
-            age_days: calculateAgeDays(user.created_at),
+            estimated_creation_date: new Date(createdAt).toLocaleDateString(),
+            account_age: calculateAccountAge(createdAt),
+            age_days: calculateAgeDays(createdAt),
             followers: user.followers_count || 0,
             verified: user.verified ? 'Yes' : 'No',
-            description: user.bio || 'N/A',
+            description: user.bio || user.user?.bio || 'N/A',
             user_id: user.id || user.user?.id || 'N/A',
-            avatar: user.profilepic || 'https://via.placeholder.com/50',
+            avatar: user.profilepic || user.user?.profile_pic || 'https://via.placeholder.com/50',
             estimation_confidence: 'High',
             accuracy_range: 'Exact',
             visit_profile: `https://kick.com/${user.slug || slug || broadcaster_user_id}`

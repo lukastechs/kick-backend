@@ -26,12 +26,12 @@ async function ensureCacheDir() {
     }
 }
 
-// Sanitize filename (preserve case, remove invalid characters)
+// Sanitize filename
 function sanitizeFilename(username) {
     return username.replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
-// Validate username format (1-20 characters, letters, numbers, underscores, hyphens)
+// Validate username format
 function isValidUsername(username) {
     return /^[a-zA-Z0-9_-]{1,20}$/.test(username);
 }
@@ -57,7 +57,7 @@ function calculateAgeDays(createdAt) {
     return Math.floor(diffMs / (1000 * 60 * 60 * 24));
 }
 
-// Check cache
+// Cache check
 async function checkCache(username) {
     const cacheFile = path.join(cacheDir, `${sanitizeFilename(username)}.json`);
     try {
@@ -68,8 +68,8 @@ async function checkCache(username) {
                 console.log(`Cache hit for username: ${username}`);
                 return { data: cacheData.data, cached: true };
             } else {
-                console.log(`Cache expired or invalid for username: ${username}`);
-                await fs.unlink(cacheFile).catch(err => console.error(`Failed to delete expired cache file: ${cacheFile}`, err.message));
+                console.log(`Cache expired for username: ${username}`);
+                await fs.unlink(cacheFile).catch(() => {});
             }
         }
     } catch (error) {
@@ -93,7 +93,7 @@ async function saveToCache(username, data) {
     }
 }
 
-// Shared handler function for Kick API requests
+// Shared handler
 async function handleKickRequest(req, res) {
     const { slug, broadcaster_user_id } = req.query;
     if (!slug && !broadcaster_user_id) {
@@ -103,49 +103,48 @@ async function handleKickRequest(req, res) {
     try {
         await ensureCacheDir();
 
-        // Check cache
         const cacheKey = slug ? slug.toLowerCase() : broadcaster_user_id;
         const cacheResult = await checkCache(cacheKey);
         if (cacheResult.cached) {
             return res.json({ data: cacheResult.data, cached: true });
         }
 
-        // Fetch from Kick API (no headers needed for public endpoint)
-        let response;
-        const params = {};
-        if (slug) params.slug = slug;
-        if (broadcaster_user_id) params.broadcaster_user_id = broadcaster_user_id;
+        // First call: channel info
+        const channelResp = await axios.get('https://api.kick.com/public/v1/channels', {
+            params: slug ? { slug } : { broadcaster_user_id },
+            timeout: 5000
+        });
 
-        try {
-            response = await axios.get('https://api.kick.com/public/v1/channels', {
-                params,
-                timeout: 5000
-            });
-        } catch (error) {
-            if (error.response?.status === 404) {
-                return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
-            }
-            throw error;
-        }
-
-        const user = response.data.data[0]; // Kick API always returns array
-        if (!user) {
+        const channel = channelResp.data.data[0];
+        if (!channel) {
             return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
         }
 
-        // Map data into your format
+        // Second call: user info (for created_at etc.)
+        let userResp = null;
+        try {
+            userResp = await axios.get(`https://api.kick.com/public/v1/users/${channel.broadcaster_user_id}`, {
+                timeout: 5000
+            });
+        } catch (err) {
+            console.warn(`Could not fetch user details for ${channel.slug}:`, err.message);
+        }
+
+        const userDetails = userResp?.data?.data || {};
+
+        // Merge data
         const kickData = {
-            username: user.slug,
-            description: user.channel_description || 'N/A',
-            user_id: user.broadcaster_user_id,
-            followers: user.followers_count || 0,
-            category: user.category?.name || 'N/A',
-            verified: user.verified ? 'Yes' : 'No',
-            created_at: user.created_at || null,
-            account_age: user.created_at ? calculateAccountAge(user.created_at) : 'Unknown',
-            age_days: user.created_at ? calculateAgeDays(user.created_at) : null,
-            avatar: user.user?.profile_pic || 'https://via.placeholder.com/50',
-            visit_profile: `https://kick.com/${user.slug}`
+            username: channel.slug,
+            description: channel.channel_description || 'N/A',
+            user_id: channel.broadcaster_user_id,
+            followers: channel.followers_count || 0,
+            category: channel.category?.name || 'N/A',
+            verified: channel.verified ? 'Yes' : 'No',
+            created_at: userDetails.created_at || null,
+            account_age: userDetails.created_at ? calculateAccountAge(userDetails.created_at) : 'Unknown',
+            age_days: userDetails.created_at ? calculateAgeDays(userDetails.created_at) : null,
+            avatar: userDetails.profile_pic || 'https://via.placeholder.com/50',
+            visit_profile: `https://kick.com/${channel.slug}`
         };
 
         // Save to cache
@@ -173,31 +172,27 @@ async function handleKickRequest(req, res) {
     }
 }
 
-// Root endpoint
+// Root
 app.get('/', (req, res) => {
     res.send('Kick Account Age Checker API is running');
 });
 
-// Path parameter route: /api/kick/username
+// Route: /api/kick/username
 app.get('/api/kick/:username', async (req, res) => {
     const username = req.params.username;
-    
-    // Validate username
     if (!isValidUsername(username)) {
         return res.status(400).json({ error: 'Invalid username format' });
     }
-    
-    // Set slug as query parameter and call the shared handler
     req.query.slug = username;
     return handleKickRequest(req, res);
 });
 
-// Query parameter route: /api/kick?slug=username or /api/kick?broadcaster_user_id=123
+// Route: /api/kick?slug=username
 app.get('/api/kick', (req, res) => {
     return handleKickRequest(req, res);
 });
 
-// Health check endpoint
+// Health
 app.get('/health', (req, res) => {
     res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });

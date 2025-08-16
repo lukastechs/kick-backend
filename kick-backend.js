@@ -55,33 +55,6 @@ function calculateAgeDays(createdAt) {
     return Math.floor(diffMs / (1000 * 60 * 60 * 24));
 }
 
-// Generate Kick Access Token
-async function getKickAccessToken() {
-    try {
-        const response = await axios.post('https://id.kick.com/oauth/token', {
-            client_id: process.env.KICK_CLIENT_ID,
-            client_secret: process.env.KICK_CLIENT_SECRET,
-            grant_type: 'client_credentials'
-        }, {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            timeout: 5000
-        });
-
-        const { access_token, expires_in } = response.data;
-        console.log('Fetched new Kick access token');
-        return access_token;
-    } catch (error) {
-        console.error('Kick Token Error:', {
-            status: error.response?.status,
-            data: error.response?.data,
-            message: error.message,
-            headers: error.config?.headers,
-            url: error.config?.url
-        });
-        throw new Error('Failed to generate Kick access token');
-    }
-}
-
 // Check cache
 async function checkCache(username) {
     const cacheFile = path.join(cacheDir, `${sanitizeFilename(username)}.json`);
@@ -135,10 +108,7 @@ async function handleKickRequest(req, res) {
             return res.json({ data: cacheResult.data, cached: true });
         }
 
-        // Fetch access token
-        const token = await getKickAccessToken();
-
-        // Fetch from Kick API
+        // Fetch from Kick API (public endpoint - no authentication needed)
         let response;
         const params = {};
         if (slug) params.slug = slug;
@@ -147,9 +117,8 @@ async function handleKickRequest(req, res) {
         try {
             response = await axios.get('https://api.kick.com/public/v1/channels', {
                 headers: {
-                    'Client-ID': process.env.KICK_CLIENT_ID,
-                    'Authorization': `Bearer ${token}`,
-                    'Accept': '*/*'
+                    'Accept': 'application/json',
+                    'User-Agent': 'Kick-Age-Checker/1.0'
                 },
                 params: params,
                 timeout: 5000
@@ -161,14 +130,26 @@ async function handleKickRequest(req, res) {
             throw error;
         }
 
-        const user = response.data.data[0]; // Assuming the response returns an array under 'data'
+        // Handle the response data structure
+        const responseData = response.data;
+        let user;
+
+        // Check if response has data array or is direct channel object
+        if (responseData.data && Array.isArray(responseData.data)) {
+            user = responseData.data[0];
+        } else if (responseData.data && !Array.isArray(responseData.data)) {
+            user = responseData.data;
+        } else {
+            user = responseData;
+        }
+
         if (!user || !user.created_at) {
             return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
         }
 
         const kickData = {
-            username: user.user?.username || (slug || broadcaster_user_id),
-            nickname: user.user?.display_name || user.user?.username || (slug || broadcaster_user_id),
+            username: user.user?.username || user.slug || (slug || broadcaster_user_id),
+            nickname: user.user?.display_name || user.user?.username || user.slug || (slug || broadcaster_user_id),
             estimated_creation_date: new Date(user.created_at).toLocaleDateString(),
             account_age: calculateAccountAge(user.created_at),
             age_days: calculateAgeDays(user.created_at),
@@ -179,7 +160,7 @@ async function handleKickRequest(req, res) {
             avatar: user.profilepic || 'https://via.placeholder.com/50',
             estimation_confidence: 'High',
             accuracy_range: 'Exact',
-            visit_profile: `https://kick.com/${slug || broadcaster_user_id}`
+            visit_profile: `https://kick.com/${user.slug || slug || broadcaster_user_id}`
         };
 
         // Save to cache
@@ -199,9 +180,6 @@ async function handleKickRequest(req, res) {
         }
         if (error.response?.status === 429) {
             return res.status(429).json({ error: 'Rate limit exceeded. Please wait a few minutes and try again.' });
-        }
-        if (error.response?.status === 401) {
-            return res.status(401).json({ error: 'Invalid or missing API token' });
         }
         res.status(error.response?.status || 500).json({
             error: 'Failed to fetch Kick data',

@@ -158,22 +158,23 @@ async function writeCache(key, data) {
 // Kick API calls
 // -------------------------------
 async function fetchChannelPublicV1({ slug, broadcasterUserId, token }) {
-  if (!token) return null; // No token? Skip
-
   const params = {};
   if (slug) params.slug = slug;
   if (broadcasterUserId) params.broadcaster_user_id = broadcasterUserId;
 
   try {
-    const resp = await axios.get('https://api.kick.com/public/v1/channels', {
+    const headers = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const resp = await axios.get('https://kick.com/api/v1/channels/' + (slug || broadcasterUserId), {
       params,
-      headers: { Authorization: `Bearer ${token}` },
+      headers,
       timeout: 7000,
     });
-    const arr = resp.data?.data;
-    return Array.isArray(arr) && arr.length ? arr[0] : null;
+    const data = resp.data;
+    return data || null;
   } catch (error) {
-    console.error('Public v1 /channels error:', {
+    console.error('v1 /channels error:', {
       status: error.response?.status,
       data: error.response?.data,
       message: error.message,
@@ -186,14 +187,22 @@ async function fetchKickV2(slug) {
   try {
     const res = await axios.get(`https://kick.com/api/v2/channels/${slug}`, {
       headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Language': 'en-US',
         'Referer': `https://kick.com/${slug}`,
         'Origin': 'https://kick.com',
-        'Connection': 'keep-alive'
+        'Connection': 'keep-alive',
+        'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="127", "Google Chrome";v="127"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin'
       },
+      timeout: 7000,
+      maxRedirects: 5, // Handle potential redirects
+      validateStatus: status => status >= 200 && status < 400 // Accept 3xx as success
     });
     return res.data;
   } catch (err) {
@@ -213,7 +222,7 @@ async function handleKickRequest(req, res) {
   const { slug: rawSlug, broadcaster_user_id: rawBroadcasterUserId } = req.query;
 
   // Basic validation
-  const slug = rawSlug ? String(rawSlug).trim() : null;
+  const slug = rawSlug ? String(rawSlug).trim().toLowerCase() : null;
   const broadcasterUserId = rawBroadcasterUserId ? String(rawBroadcasterUserId).trim() : null;
 
   if (!slug && !broadcasterUserId) {
@@ -248,7 +257,7 @@ async function handleKickRequest(req, res) {
       if (!v1 || !v1.slug) {
         return res.status(404).json({ error: `User ${broadcasterUserId} not found` });
       }
-      resolvedSlug = v1.slug;
+      resolvedSlug = v1.slug.toLowerCase();
     }
 
     // Step 3: Call v2 with slug to get verified/followers/description/created_at etc.
@@ -256,7 +265,7 @@ async function handleKickRequest(req, res) {
       return res.status(404).json({ error: 'Channel not found' });
     }
 
-    const v2 = await fetchKickV2(resolvedSlug); // Fixed: Changed from fetchChannelV2BySlug to fetchKickV2
+    const v2 = await fetchKickV2(resolvedSlug);
 
     if (!v1) {
       // If we already didn't call v1 above, try to call it now (non-fatal if it fails)
@@ -268,30 +277,30 @@ async function handleKickRequest(req, res) {
       return res.status(404).json({ error: `User ${resolvedSlug} not found` });
     }
 
-    // Extract fields
-    const createdAt = v2?.chatroom?.created_at || null;
+    // Extract fields, prioritizing v2 for accuracy
+    const createdAt = v2?.chatroom?.created_at || v1?.created_at || null;
     const ageDays = calculateAgeDays(createdAt);
 
     const data = {
       // Identifiers
       slug: resolvedSlug,
-      channel_id: v2?.id ?? null,
-      user_id: v2?.user_id ?? null,
+      channel_id: v2?.id ?? v1?.id ?? null,
+      user_id: v2?.user_id ?? v1?.user_id ?? null,
 
       // Core display fields
-      username: v2?.user?.username ?? resolvedSlug,
-      description: v2?.user?.bio ?? v1?.channel_description ?? null,
-      avatar: v2?.user?.profile_pic ?? null,
+      username: v2?.user?.username ?? v1?.user?.username ?? resolvedSlug,
+      description: v2?.user?.bio ?? v1?.channel_description ?? 'N/A',
+      avatar: v2?.user?.profile_pic ?? v1?.profilepic ?? 'https://via.placeholder.com/50',
 
       // Status & metrics
-      verified: v2?.verified === true,
-      followers: typeof v2?.followers_count === 'number' ? v2.followers_count : null,
-      is_banned: v2?.is_banned === true,
+      verified: v2?.verified === true ? 'Yes' : 'No',
+      followers: typeof v2?.followers_count === 'number' ? v2.followers_count : (v1?.followers_count || 0),
+      is_banned: v2?.is_banned === true ? 'Yes' : 'No',
 
       // Live + category
-      category: v1?.category?.name ?? (Array.isArray(v2?.recent_categories) && v2.recent_categories.length ? v2.recent_categories[0].name : null),
-      is_live: typeof v1?.stream?.is_live === 'boolean' ? v1.stream.is_live : Boolean(v2?.livestream),
-      stream_title: v1?.stream_title ?? v2?.livestream?.session_title ?? null,
+      category: v1?.category?.name ?? (Array.isArray(v2?.recent_categories) && v2.recent_categories.length ? v2.recent_categories[0].name : 'N/A'),
+      is_live: typeof v1?.stream?.is_live === 'boolean' ? (v1.stream.is_live ? 'Yes' : 'No') : (Boolean(v2?.livestream) ? 'Yes' : 'No'),
+      stream_title: v1?.stream_title ?? v2?.livestream?.session_title ?? 'N/A',
 
       // Creation & age
       channel_created_at: createdAt, // raw ISO string from v2.chatroom.created_at

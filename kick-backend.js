@@ -26,19 +26,18 @@ async function ensureCacheDir() {
     }
 }
 
-// Sanitize filename
+// Sanitize filename (preserve case, remove invalid characters)
 function sanitizeFilename(username) {
     return username.replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
-// Validate username format
+// Validate username format (1-20 characters, letters, numbers, underscores, hyphens)
 function isValidUsername(username) {
     return /^[a-zA-Z0-9_-]{1,20}$/.test(username);
 }
 
 // Calculate account age in human-readable format
 function calculateAccountAge(createdAt) {
-    if (!createdAt) return 'Unknown';
     const now = new Date();
     const created = new Date(createdAt);
     const diffMs = now - created;
@@ -50,14 +49,40 @@ function calculateAccountAge(createdAt) {
 
 // Calculate age in days
 function calculateAgeDays(createdAt) {
-    if (!createdAt) return null;
     const now = new Date();
     const created = new Date(createdAt);
     const diffMs = now - created;
     return Math.floor(diffMs / (1000 * 60 * 60 * 24));
 }
 
-// Cache check
+// Generate Kick Access Token
+async function getKickAccessToken() {
+    try {
+        const response = await axios.post('https://id.kick.com/oauth/token', {
+            client_id: process.env.KICK_CLIENT_ID,
+            client_secret: process.env.KICK_CLIENT_SECRET,
+            grant_type: 'client_credentials'
+        }, {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            timeout: 5000
+        });
+
+        const { access_token, expires_in } = response.data;
+        console.log('Fetched new Kick access token');
+        return access_token;
+    } catch (error) {
+        console.error('Kick Token Error:', {
+            status: error.response?.status,
+            data: error.response?.data,
+            message: error.message,
+            headers: error.config?.headers,
+            url: error.config?.url
+        });
+        throw new Error('Failed to generate Kick access token');
+    }
+}
+
+// Check cache
 async function checkCache(username) {
     const cacheFile = path.join(cacheDir, `${sanitizeFilename(username)}.json`);
     try {
@@ -68,8 +93,8 @@ async function checkCache(username) {
                 console.log(`Cache hit for username: ${username}`);
                 return { data: cacheData.data, cached: true };
             } else {
-                console.log(`Cache expired for username: ${username}`);
-                await fs.unlink(cacheFile).catch(() => {});
+                console.log(`Cache expired or invalid for username: ${username}`);
+                await fs.unlink(cacheFile).catch(err => console.error(`Failed to delete expired cache file: ${cacheFile}`, err.message));
             }
         }
     } catch (error) {
@@ -93,8 +118,13 @@ async function saveToCache(username, data) {
     }
 }
 
-// Shared handler
-async function handleKickRequest(req, res) {
+// Root endpoint
+app.get('/', (req, res) => {
+    res.send('Kick Account Age Checker API is running');
+});
+
+// Kick age checker endpoint
+app.get('/api/kick', async (req, res) => {
     const { slug, broadcaster_user_id } = req.query;
     if (!slug && !broadcaster_user_id) {
         return res.status(400).json({ error: 'Either slug or broadcaster_user_id is required' });
@@ -103,48 +133,57 @@ async function handleKickRequest(req, res) {
     try {
         await ensureCacheDir();
 
+        // Check cache
         const cacheKey = slug ? slug.toLowerCase() : broadcaster_user_id;
         const cacheResult = await checkCache(cacheKey);
         if (cacheResult.cached) {
             return res.json({ data: cacheResult.data, cached: true });
         }
 
-        // First call: channel info
-        const channelResp = await axios.get('https://api.kick.com/public/v1/channels', {
-            params: slug ? { slug } : { broadcaster_user_id },
-            timeout: 5000
-        });
+        // Fetch access token
+        const token = await getKickAccessToken();
 
-        const channel = channelResp.data.data[0];
-        if (!channel) {
+        // Fetch from Kick API
+        let response;
+        const params = {};
+        if (slug) params.slug = slug;
+        if (broadcaster_user_id) params.broadcaster_user_id = broadcaster_user_id;
+
+        try {
+            response = await axios.get('https://api.kick.com/public/v1/channels', {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': '*/*'
+                },
+                params: params,
+                timeout: 5000
+            });
+        } catch (error) {
+            if (error.response?.status === 404) {
+                return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
+            }
+            throw error;
+        }
+
+        const user = response.data.data[0]; // Assuming the response returns an array under 'data'
+        if (!user || !user.created_at) {
             return res.status(404).json({ error: `User ${slug || broadcaster_user_id} not found` });
         }
 
-        // Second call: user info (for created_at etc.)
-        let userResp = null;
-        try {
-            userResp = await axios.get(`https://api.kick.com/public/v1/users/${channel.broadcaster_user_id}`, {
-                timeout: 5000
-            });
-        } catch (err) {
-            console.warn(`Could not fetch user details for ${channel.slug}:`, err.message);
-        }
-
-        const userDetails = userResp?.data?.data || {};
-
-        // Merge data
         const kickData = {
-            username: channel.slug,
-            description: channel.channel_description || 'N/A',
-            user_id: channel.broadcaster_user_id,
-            followers: channel.followers_count || 0,
-            category: channel.category?.name || 'N/A',
-            verified: channel.verified ? 'Yes' : 'No',
-            created_at: userDetails.created_at || null,
-            account_age: userDetails.created_at ? calculateAccountAge(userDetails.created_at) : 'Unknown',
-            age_days: userDetails.created_at ? calculateAgeDays(userDetails.created_at) : null,
-            avatar: userDetails.profile_pic || 'https://via.placeholder.com/50',
-            visit_profile: `https://kick.com/${channel.slug}`
+            username: user.user?.username || (slug || broadcaster_user_id),
+            nickname: user.user?.display_name || user.user?.username || (slug || broadcaster_user_id),
+            estimated_creation_date: new Date(user.created_at).toLocaleDateString(),
+            account_age: calculateAccountAge(user.created_at),
+            age_days: calculateAgeDays(user.created_at),
+            followers: user.followers_count || 0,
+            verified: user.verified ? 'Yes' : 'No',
+            description: user.bio || 'N/A',
+            user_id: user.id || user.user?.id || 'N/A',
+            avatar: user.profilepic || 'https://via.placeholder.com/50',
+            estimation_confidence: 'High',
+            accuracy_range: 'Exact',
+            visit_profile: `https://kick.com/${slug || broadcaster_user_id}`
         };
 
         // Save to cache
@@ -165,34 +204,17 @@ async function handleKickRequest(req, res) {
         if (error.response?.status === 429) {
             return res.status(429).json({ error: 'Rate limit exceeded. Please wait a few minutes and try again.' });
         }
+        if (error.response?.status === 401) {
+            return res.status(401).json({ error: 'Invalid or missing API token' });
+        }
         res.status(error.response?.status || 500).json({
             error: 'Failed to fetch Kick data',
             details: error.message || 'No additional details'
         });
     }
-}
-
-// Root
-app.get('/', (req, res) => {
-    res.send('Kick Account Age Checker API is running');
 });
 
-// Route: /api/kick/username
-app.get('/api/kick/:username', async (req, res) => {
-    const username = req.params.username;
-    if (!isValidUsername(username)) {
-        return res.status(400).json({ error: 'Invalid username format' });
-    }
-    req.query.slug = username;
-    return handleKickRequest(req, res);
-});
-
-// Route: /api/kick?slug=username
-app.get('/api/kick', (req, res) => {
-    return handleKickRequest(req, res);
-});
-
-// Health
+// Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });

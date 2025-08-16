@@ -195,19 +195,25 @@ async function fetchChannelPublicV1({ slug, broadcasterUserId, token }) {
   }
 }
 
-async function fetchChannelV2BySlug(slug) {
+async function fetchKickV2(slug) {
   try {
-    const resp = await axios.get(`https://kick.com/api/v2/channels/${encodeURIComponent(slug)}` , {
-      timeout: 7000,
+    const res = await axios.get(`https://kick.com/api/v2/channels/${slug}`, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': `https://kick.com/${slug}`,
+        'Origin': 'https://kick.com',
+        'Connection': 'keep-alive'
+      },
     });
-    return resp.data || null;
-  } catch (error) {
-    // 404 or other
-    if (error.response?.status === 404) return null;
-    console.error('v2 /channels/{slug} error:', {
-      status: error.response?.status,
-      data: error.response?.data,
-      message: error.message,
+    return res.data;
+  } catch (err) {
+    console.error("v2 /channels/{slug} error:", {
+      status: err.response?.status,
+      data: err.response?.data,
+      message: err.message,
     });
     return null;
   }

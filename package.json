@@ -1,0 +1,14 @@
+{
+  "name": "kick-backend",
+  "version": "1.0.0",
+  "description": "Kick.com age checker backend",
+  "main": "kick-backend.js",
+  "scripts": {
+    "start": "node kick-backend.js"
+  },
+  "dependencies": {
+    "axios": "^0.21.1",
+    "dotenv": "^10.0.0",
+    "express": "^4.17.1"
+  }
+}

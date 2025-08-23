@@ -1,47 +1,36 @@
 const express = require('express');
 const axios = require('axios');
+const qs = require('qs');
 const dotenv = require('dotenv');
-const qs = require('querystring'); // For URL-encoding the token request
-
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-const KICK_API_URL = 'https://api.kick.com/public/v1/channels/'; // Public API endpoint for channels
-const KICK_OAUTH_URL = 'https://id.kick.com/oauth/token'; // OAuth token endpoint
-
-// Step 1: Function to get App Access Token using Client Credentials flow
+// Function to get App Access Token
 async function getAppAccessToken() {
+    const data = qs.stringify({
+        grant_type: 'client_credentials',
+        client_id: process.env.KICK_CLIENT_ID,  // Add your client ID
+        client_secret: process.env.KICK_CLIENT_SECRET,  // Add your client secret
+    });
+
     try {
-        const response = await axios.post(KICK_OAUTH_URL, qs.stringify({
-            grant_type: 'client_credentials',
-            client_id: process.env.KICK_CLIENT_ID || 'YOUR_CLIENT_ID_HERE',
-            client_secret: process.env.KICK_CLIENT_SECRET || 'YOUR_CLIENT_SECRET_HERE'
-        }), {
+        const response = await axios.post('https://id.kick.com/oauth/token', data, {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
         });
 
-        const data = response.data;
-        if (!data.access_token) {
-            throw new Error('No access token received');
-        }
-        return data.access_token;
+        const { access_token } = response.data;
+        return access_token;
     } catch (error) {
-        console.error('Error fetching App Access Token:', error.response?.data || error.message);
+        console.error('Error fetching App Access Token:', error);
         throw error;
     }
 }
 
-// Step 2: Root route to check if the server is running
-app.get('/', (req, res) => {
-    res.send('Kick Backend is up and running!');
-});
-
-// Step 3: Fetch channel profile by slug
+// Route to get Kick profile data by slug
 app.get('/kick-profile', async (req, res) => {
     const { slug } = req.query;
 
@@ -50,40 +39,37 @@ app.get('/kick-profile', async (req, res) => {
     }
 
     try {
-        // Get App Access Token
+        // Step 1: Get the App Access Token
         const accessToken = await getAppAccessToken();
 
-        // Fetch channel data with the token
-        const response = await axios.get(`${KICK_API_URL}${slug}`, {
+        // Step 2: Call the Kick public API to fetch profile data by slug
+        const response = await axios.get(`https://api.kick.com/public/v1/channels/${slug}`, {
             headers: {
-                'Authorization': `Bearer ${accessToken}`,
+                'Authorization': `Bearer ${accessToken}`,  // Use the Bearer token
                 'Accept': '*/*',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': 'https://kick.com/',
-                'Origin': 'https://kick.com'
             }
         });
 
         const data = response.data;
 
-        // Map response to desired fields (adjust based on actual API response structure)
+        // Step 3: Extract relevant fields and send the response
         res.json({
-            profile_image: data.user?.profile_pic || data.banner_image?.url || null,
+            profile_image: data.user?.profile_pic || data.banner_image?.url || null,  // Profile pic or fallback to banner
             follower_count: data.followers_count || null,
-            channel_created: data.created_at || null,
+            channel_created: data.created_at || null,  // May not be available, fallback to null
             verification_status: data.verified || false,
             banned_status: data.is_banned || false,
-            channel_slug: data.slug || slug
+            channel_slug: data.slug,
         });
     } catch (error) {
-        console.error('Error fetching profile:', error.response?.data || error.message);
-        res.status(500).json({
-            error: 'Failed to fetch profile.',
-            details: error.response?.data?.error || error.message,
-            reference: error.response?.data?.reference || 'N/A'
-        });
+        console.error('Error fetching profile:', error);
+        res.status(500).json({ error: 'Failed to fetch profile.' });
     }
+});
+
+// Root route to confirm the server is running
+app.get('/', (req, res) => {
+    res.send('Kick Backend is up and running!');
 });
 
 // Start the server

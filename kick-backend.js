@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const cloudscraper = require('cloudscraper');
 const qs = require('qs');
 const moment = require('moment');
 const cors = require('cors');
@@ -13,6 +14,7 @@ app.use(express.json());
 
 const KICK_OAUTH_URL = 'https://id.kick.com/oauth/token';
 const KICK_API_URL = 'https://api.kick.com/public/v1/channels';
+const KICK_API_URL_V2 = 'https://kick.com/api/v2/channels/';
 
 // Calculate account age in human-readable format
 function calculateAccountAge(createdAt) {
@@ -59,7 +61,8 @@ async function getChannelProfile(slug) {
   const access_token = await getAppAccessToken();
 
   try {
-    const response = await axios.get(KICK_API_URL, {
+    // Try v1 first for baseline data
+    const v1Response = await axios.get(KICK_API_URL, {
       params: { slug: slug },
       headers: {
         'Authorization': `Bearer ${access_token}`,
@@ -67,16 +70,41 @@ async function getChannelProfile(slug) {
       }
     });
 
-    const channelData = response.data;
-    console.log('Channel Data:', JSON.stringify(channelData, null, 2));
-    // Log specific fields to check their presence
-    const channel = channelData.data[0];
-    console.log('Checked created_at:', channel?.created_at || 'Not found');
-    console.log('Checked followers_count:', channel?.followers_count || 'Not found');
+    let channelData = v1Response.data;
+    console.log('v1 Channel Data:', JSON.stringify(channelData, null, 2));
 
-    return channelData;
+    // Try v2 with cloudscraper to bypass security policy
+    console.log('Trying v2 endpoint for additional fields...');
+    const v2Response = await cloudscraper.get(`${KICK_API_URL_V2}${slug}`, {
+      headers: {
+        'Authorization': `Bearer ${access_token}`,
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://kick.com/',
+        'Origin': 'https://kick.com'
+      }
+    });
+
+    const v2Data = JSON.parse(v2Response);
+    console.log('v2 Channel Data:', JSON.stringify(v2Data, null, 2));
+    // Log specific fields from v2
+    console.log('Checked created_at from v2:', v2Data?.created_at || 'Not found');
+    console.log('Checked followers_count from v2:', v2Data?.followers_count || 'Not found');
+
+    // Merge v1 and v2 data, prioritizing v2 for created_at and followers_count
+    const mergedData = {
+      ...channelData.data[0],
+      ...(v2Data || {})
+    };
+
+    return { data: [mergedData] };
   } catch (error) {
     console.error('Error fetching channel data:', error.response?.data || error.message);
+    if (error.response?.status === 403 || error.response?.status === 404) {
+      console.log('v2 failed, falling back to v1 data');
+      return channelData; // Return v1 data if v2 is blocked
+    }
     throw error;
   }
 }

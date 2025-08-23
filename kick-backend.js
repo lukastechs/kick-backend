@@ -2,13 +2,36 @@ const express = require('express');
 const axios = require('axios');
 const qs = require('qs');
 const moment = require('moment');
+const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+app.use(cors());
+app.use(express.json());
+
 const KICK_OAUTH_URL = 'https://id.kick.com/oauth/token';
 const KICK_API_URL = 'https://api.kick.com/public/v1/channels';
+
+// Calculate account age in human-readable format
+function calculateAccountAge(createdAt) {
+    if (!createdAt || createdAt === '0001-01-01T00:00:00Z') return null;
+    const now = moment();
+    const created = moment(createdAt);
+    const years = now.diff(created, 'years');
+    now.subtract(years, 'years');
+    const months = now.diff(created, 'months');
+    return years > 0 ? `${years} year${years > 1 ? 's' : ''}${months > 0 ? `, ${months} month${months > 1 ? 's' : ''}` : ''}` : `${months} month${months > 1 ? 's' : ''}`;
+}
+
+// Calculate age in days
+function calculateAgeDays(createdAt) {
+    if (!createdAt || createdAt === '0001-01-01T00:00:00Z') return null;
+    const now = moment();
+    const created = moment(createdAt);
+    return Math.floor(now.diff(created, 'days'));
+}
 
 async function getAppAccessToken() {
     try {
@@ -34,10 +57,8 @@ async function getAppAccessToken() {
 
 async function getChannelProfile(slug) {
     const access_token = await getAppAccessToken();
-
     try {
-        // Try v1 endpoint first
-        let response = await axios.get(KICK_API_URL, {
+        const response = await axios.get(KICK_API_URL, {
             params: { slug: slug },
             headers: {
                 'Authorization': `Bearer ${access_token}`,
@@ -45,28 +66,18 @@ async function getChannelProfile(slug) {
             }
         });
 
-        let channelData = response.data;
-        console.log('v1 Channel Data:', JSON.stringify(channelData, null, 2));
-
-        // If verified or followers_count are missing, try v2 endpoint
-        if (!channelData.data[0]?.verified && !channelData.data[0]?.followers_count) {
-            console.log('Trying v2 endpoint for additional fields...');
-            response = await axios.get(`${KICK_API_URL_V2}${slug}`, {
-                headers: {
-                    'Authorization': `Bearer ${access_token}`,
-                    'Accept': 'application/json'
-                }
-            });
-            channelData = response.data;
-            console.log('v2 Channel Data:', JSON.stringify(channelData, null, 2));
-        }
-
+        const channelData = response.data;
+        console.log('Channel Data:', JSON.stringify(channelData, null, 2));
         return channelData;
     } catch (error) {
         console.error('Error fetching channel data:', error.response?.data || error.message);
         throw error;
     }
 }
+
+app.get('/', (req, res) => {
+    res.send('Kick Account Age Checker API is running');
+});
 
 app.get('/kick-profile', async (req, res) => {
     const { slug } = req.query;
@@ -83,31 +94,20 @@ app.get('/kick-profile', async (req, res) => {
             return res.status(404).json({ error: 'Channel not found.', details: `No channel found for slug: ${slug}` });
         }
 
-        // Calculate account age (assuming channel_created exists; fallback to start_time)
-        let createdDate = channel.created_at || channel.stream?.start_time;
-        let accountAge = null;
-        let formattedCreatedDate = null;
-
-        if (createdDate && createdDate !== '0001-01-01T00:00:00Z') {
-            const createdMoment = moment(createdDate);
-            formattedCreatedDate = createdMoment.format('MMMM D, YYYY');
-            const now = moment();
-            const years = now.diff(createdMoment, 'years');
-            now.subtract(years, 'years');
-            const months = now.diff(createdMoment, 'months');
-            accountAge = years > 0 ? `${years} year${years > 1 ? 's' : ''}${months > 0 ? `, ${months} month${months > 1 ? 's' : ''}` : ''}` : `${months} month${months > 1 ? 's' : ''}`;
-        }
-
-        // Format start_time
-        const startTime = channel.stream?.start_time && channel.stream.start_time !== '0001-01-01T00:00:00Z'
-            ? moment(channel.stream.start_time).format('MMMM D, YYYY')
+        // Calculate account age and dates
+        const createdAt = channel.created_at || channel.stream?.start_time;
+        const formattedCreatedDate = createdAt && createdAt !== '0001-01-01T00:00:00Z'
+            ? moment(createdAt).format('MMMM D, YYYY')
             : null;
+        const accountAge = calculateAccountAge(createdAt);
+        const ageDays = calculateAgeDays(createdAt);
 
         res.json({
             profile_image: channel.banner_picture || null,
             follower_count: channel.followers_count || null,
-            channel_created: formattedCreatedDate || null,
-            account_age: accountAge || null,
+            channel_created: formattedCreatedDate,
+            account_age: accountAge,
+            age_days: ageDays,
             verification_status: channel.verified || false,
             banned_status: channel.is_banned || false,
             channel_slug: channel.slug || slug,
@@ -117,7 +117,9 @@ app.get('/kick-profile', async (req, res) => {
             is_live: channel.stream?.is_live || false,
             is_mature: channel.stream?.is_mature || false,
             viewer_count: channel.stream?.viewer_count || null,
-            stream_start_time: startTime || null
+            stream_start_time: channel.stream?.start_time && channel.stream.start_time !== '0001-01-01T00:00:00Z'
+                ? moment(channel.stream.start_time).format('MMMM D, YYYY')
+                : null
         });
     } catch (error) {
         res.status(error.response?.status || 500).json({

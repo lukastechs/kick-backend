@@ -7,7 +7,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Public API endpoint for channel data by slug
-const KICK_API_URL = 'https://kick.com/api/v2/channels/';
+const KICK_API_URL = 'https://kick.com/api/v1/channels/';
 
 // Step 1: Root route (optional) to check if the server is running
 app.get('/', (req, res) => {

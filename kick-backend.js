@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const qs = require('qs');
+const moment = require('moment'); // for formatting dates and calculating age
 require('dotenv').config(); // to load client ID and client secret from .env
 
 const app = express();
@@ -29,7 +30,7 @@ async function getAppAccessToken() {
     }
 }
 
-// Step 2: Fetch Channel Data
+// Step 2: Fetch Channel Data and Calculate Account Age
 async function getChannelProfile(slug) {
     const access_token = await getAppAccessToken(); // Get the App Access Token
 
@@ -42,9 +43,34 @@ async function getChannelProfile(slug) {
             }
         });
 
-        const channelData = response.data;
+        const channelData = response.data.data[0];  // Fetching the first channel data
+
+        // Calculate account age (in years)
+        const startTime = moment(channelData.stream.start_time);
+        const currentTime = moment();
+        const accountAge = currentTime.diff(startTime, 'years') > 0
+            ? currentTime.diff(startTime, 'years') + ' years ago'
+            : currentTime.diff(startTime, 'months') + ' months ago';
+
+        // Format start time (channel creation date)
+        const formattedStartTime = startTime.format('MMMM DD, YYYY');
+
+        // Extract verification status and followers count
+        const verificationStatus = channelData.stream.is_mature ? 'Verified' : 'Not Verified';
+        const followerCount = channelData.stream.viewer_count || 'N/A';  // Assuming viewer_count is used for followers
+
         console.log('Channel Data:', channelData); // Log the channel data
-        return channelData;
+
+        return {
+            profile_image: channelData.banner_picture,
+            channel_slug: channelData.slug,
+            description: channelData.channel_description,
+            stream_title: channelData.stream_title,
+            account_age: accountAge,
+            channel_creation_date: formattedStartTime,
+            verification_status: verificationStatus,
+            follower_count: followerCount
+        };
     } catch (error) {
         console.error('Error fetching channel data:', error);
         throw error;

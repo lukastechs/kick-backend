@@ -14,13 +14,18 @@ const KICK_AUTH_URL = 'https://kick.com/oauth/authorize';
 const KICK_TOKEN_URL = 'https://kick.com/oauth/token';
 const KICK_API_URL = 'https://api.kick.com/v1/channels';
 
-// Step 1: Redirect user to the Kick authorization page
+// Step 1: Root route (optional) to check if the server is running
+app.get('/', (req, res) => {
+    res.send('Kick Backend is up and running!');
+});
+
+// Step 2: Redirect user to the Kick authorization page
 app.get('/auth', (req, res) => {
     const authUrl = `${KICK_AUTH_URL}?client_id=${process.env.KICK_CLIENT_ID}&redirect_uri=${process.env.KICK_REDIRECT_URI}&response_type=code&scope=channel_read`;
     res.redirect(authUrl);
 });
 
-// Step 2: Callback endpoint to handle the authorization code
+// Step 3: Callback endpoint to handle the authorization code
 app.get('/callback', async (req, res) => {
     const { code } = req.query;  // Authorization code from Kick
     if (!code) {
@@ -28,7 +33,7 @@ app.get('/callback', async (req, res) => {
     }
 
     try {
-        // Step 3: Exchange authorization code for access token
+        // Step 4: Exchange authorization code for access token
         const response = await axios.post(KICK_TOKEN_URL, qs.stringify({
             client_id: process.env.KICK_CLIENT_ID,
             client_secret: process.env.KICK_CLIENT_SECRET,
@@ -39,9 +44,9 @@ app.get('/callback', async (req, res) => {
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
         });
 
-        // Step 4: Store the access token and refresh token
+        // Step 5: Store the access token and refresh token
         const { access_token, refresh_token } = response.data;
-        // Store these tokens securely, e.g., in memory or a database
+        // Store these tokens securely (e.g., in memory or a database)
         res.json({ access_token, refresh_token });
     } catch (error) {
         console.error('Error fetching access token:', error);
@@ -49,7 +54,7 @@ app.get('/callback', async (req, res) => {
     }
 });
 
-// Step 5: Use the access token to fetch the channel data
+// Step 6: Use the access token to fetch the channel data
 app.get('/kick-profile', async (req, res) => {
     const { access_token, broadcaster_user_id, slug } = req.query;
 
@@ -82,6 +87,7 @@ app.get('/kick-profile', async (req, res) => {
     }
 });
 
+// Start the server
 app.listen(port, () => {
     console.log(`Kick API backend running on port ${port}`);
 });

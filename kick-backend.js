@@ -67,11 +67,24 @@ app.get('/kick-profile', async (req, res) => {
     }
 
     try {
+        // Log the incoming request for debugging
+        console.log(`Fetching profile for slug: ${slug || broadcaster_user_id}`);
+
+        // Make API call using the slug or broadcaster_user_id
         const response = await axios.get(KICK_API_URL, {
-            params: { broadcaster_user_id, slug },
+            params: { slug: slug }, // Use only one parameter (slug or broadcaster_user_id)
             headers: { 'Authorization': `Bearer ${access_token}` }
         });
 
+        // Log the API response for debugging
+        console.log('API Response:', response.data);
+
+        // Check if the response contains data
+        if (!response.data) {
+            return res.status(404).json({ error: 'Channel not found.' });
+        }
+
+        // Return relevant profile data
         const data = response.data;
         res.json({
             profile_image: data.profile_image_url,
@@ -82,7 +95,11 @@ app.get('/kick-profile', async (req, res) => {
             channel_slug: data.slug
         });
     } catch (error) {
+        // Log detailed error information
         console.error('Error fetching profile:', error);
+        if (error.response) {
+            console.error('Error response data:', error.response.data);
+        }
         res.status(500).json({ error: 'Failed to fetch profile.' });
     }
 });

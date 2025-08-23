@@ -4,11 +4,19 @@
   "description": "Kick.com age checker backend",
   "main": "kick-backend.js",
   "scripts": {
-    "start": "node kick-backend.js"
+    "start": "node kick-backend.js",
+    "dev": "nodemon kick-backend.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
-    "axios": "^0.21.1",
-    "dotenv": "^10.0.0",
-    "express": "^4.17.1"
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "cloudscraper": "^4.6.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
   }
 }

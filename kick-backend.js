@@ -9,7 +9,6 @@ const port = process.env.PORT || 3000;
 
 const KICK_OAUTH_URL = 'https://id.kick.com/oauth/token';
 const KICK_API_URL = 'https://api.kick.com/public/v1/channels';
-const KICK_API_URL_V2 = 'https://kick.com/api/v2/channels/'; // Fallback for extra fields
 
 async function getAppAccessToken() {
     try {

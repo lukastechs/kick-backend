@@ -133,7 +133,7 @@ app.get('/kick-profile', async (req, res) => {
       return res.status(404).json({ error: 'Channel not found.', details: `No channel found for slug: ${slug}` });
     }
 
-    // Format response with calculated fields
+    // Format response with calculated fields and new additions
     const createdAt = channel.created_at || channel.stream?.start_time;
     const formattedCreatedDate = createdAt && createdAt !== '0001-01-01T00:00:00Z'
       ? moment(createdAt).format('MMMM D, YYYY')
@@ -152,13 +152,15 @@ app.get('/kick-profile', async (req, res) => {
       channel_slug: channel.slug || slug,
       channel_description: channel.channel_description || null,
       broadcaster_user_id: channel.broadcaster_user_id || null,
+      user_id: channel.broadcaster_user_id || null, // Added user_id, same as broadcaster_user_id
       stream_title: channel.stream_title || null,
       is_live: channel.stream?.is_live || false,
       is_mature: channel.stream?.is_mature || false,
       viewer_count: channel.stream?.viewer_count || null,
       stream_start_time: channel.stream?.start_time && channel.stream.start_time !== '0001-01-01T00:00:00Z'
         ? moment(channel.stream.start_time).format('MMMM D, YYYY')
-        : null
+        : null,
+      visit_on_kick: `https://kick.com/${channel.slug || slug}` // Added visit_on_kick URL
     });
   } catch (error) {
     res.status(error.response?.status || 500).json({

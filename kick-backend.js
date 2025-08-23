@@ -1,117 +1,134 @@
 const express = require('express');
 const axios = require('axios');
-const cors = require('cors');
+const qs = require('qs');
+const moment = require('moment');
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(express.json());
+const KICK_OAUTH_URL = 'https://id.kick.com/oauth/token';
+const KICK_API_URL = 'https://api.kick.com/public/v1/channels';
+const KICK_API_URL_V2 = 'https://kick.com/api/v2/channels/'; // Fallback for extra fields
 
-// Calculate account age in human-readable format
-function calculateAccountAge(createdAt) {
-  const now = new Date();
-  const created = new Date(createdAt);
-  const diffMs = now - created;
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-  const years = Math.floor(diffDays / 365);
-  const months = Math.floor((diffDays % 365) / 30);
-  return years > 0 ? `${years} years, ${months} months` : `${months} months`;
+async function getAppAccessToken() {
+    try {
+        const response = await axios.post(KICK_OAUTH_URL, qs.stringify({
+            grant_type: 'client_credentials',
+            client_id: process.env.KICK_CLIENT_ID,
+            client_secret: process.env.KICK_CLIENT_SECRET
+        }), {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        });
+
+        const access_token = response.data.access_token;
+        console.log('Access Token:', access_token);
+        if (!access_token) {
+            throw new Error('No access token received');
+        }
+        return access_token;
+    } catch (error) {
+        console.error('Error fetching App Access Token:', error.response?.data || error.message);
+        throw error;
+    }
 }
 
-// Format the channel's creation date as "February 14, 2023"
-function formatCreationDate(createdAt) {
-  const options = { year: 'numeric', month: 'long', day: 'numeric' };
-  return new Date(createdAt).toLocaleDateString(undefined, options);
+async function getChannelProfile(slug) {
+    const access_token = await getAppAccessToken();
+
+    try {
+        // Try v1 endpoint first
+        let response = await axios.get(KICK_API_URL, {
+            params: { slug: slug },
+            headers: {
+                'Authorization': `Bearer ${access_token}`,
+                'Accept': 'application/json'
+            }
+        });
+
+        let channelData = response.data;
+        console.log('v1 Channel Data:', JSON.stringify(channelData, null, 2));
+
+        // If verified or followers_count are missing, try v2 endpoint
+        if (!channelData.data[0]?.verified && !channelData.data[0]?.followers_count) {
+            console.log('Trying v2 endpoint for additional fields...');
+            response = await axios.get(`${KICK_API_URL_V2}${slug}`, {
+                headers: {
+                    'Authorization': `Bearer ${access_token}`,
+                    'Accept': 'application/json'
+                }
+            });
+            channelData = response.data;
+            console.log('v2 Channel Data:', JSON.stringify(channelData, null, 2));
+        }
+
+        return channelData;
+    } catch (error) {
+        console.error('Error fetching channel data:', error.response?.data || error.message);
+        throw error;
+    }
 }
 
-// Generate Kick App Access Token
-async function getKickAccessToken() {
-  try {
-    const response = await axios.post('https://id.kick.com/oauth/token', null, {
-      params: {
-        client_id: process.env.KICK_CLIENT_ID,
-        client_secret: process.env.KICK_CLIENT_SECRET,
-        grant_type: 'client_credentials',
-      },
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      timeout: 5000,
-    });
+app.get('/kick-profile', async (req, res) => {
+    const { slug } = req.query;
 
-    const { access_token } = response.data;
-    console.log('Fetched new access token');
-    return access_token;
-  } catch (error) {
-    console.error('Kick Token Error:', {
-      status: error.response?.status,
-      data: error.response?.data,
-      message: error.message,
-    });
-    throw new Error('Failed to generate Kick access token');
-  }
-}
-
-// Root endpoint
-app.get('/', (req, res) => {
-  res.send('Kick Account Age Checker API is running');
-});
-
-// Kick age checker endpoint (GET)
-app.get('/api/kick/:slug', async (req, res) => {
-  const { slug } = req.params;
-  if (!slug) {
-    return res.status(400).json({ error: 'Slug is required' });
-  }
-
-  try {
-    const token = await getKickAccessToken();
-    const response = await axios.get(`https://api.kick.com/public/v1/channels`, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Accept': 'application/json',
-      },
-      params: { slug },
-      timeout: 5000,
-    });
-
-    const channel = response.data.data[0];
-    if (!channel) {
-      return res.status(404).json({ error: `Channel ${slug} not found` });
+    if (!slug) {
+        return res.status(400).json({ error: 'Slug (username) is required.' });
     }
 
-    res.json({
-      username: channel.slug,
-      channel_description: channel.channel_description || 'No description',
-      banner_picture: channel.banner_picture || 'No banner',
-      creation_date: formatCreationDate(channel.stream.start_time),
-      account_age: calculateAccountAge(channel.stream.start_time),
-      verification_status: channel.stream.is_live ? 'Verified' : 'Not Verified',
-      followers: 'Visit Profile', // Placeholder, Kick API doesn't provide follower count publicly
-      avatar: channel.stream.thumbnail || 'https://via.placeholder.com/50',
-      stream_status: channel.stream.is_live ? 'Live' : 'Offline',
-      category: channel.category.name || 'Uncategorized',
-    });
-  } catch (error) {
-    console.error('Kick API Error:', {
-      status: error.response?.status,
-      data: error.response?.data,
-      message: error.message,
-    });
-    res.status(error.response?.status || 500).json({
-      error: error.message || 'Failed to fetch Kick data',
-      details: error.response?.data || 'No additional details',
-    });
-  }
-});
+    try {
+        const channelData = await getChannelProfile(slug);
+        const channel = channelData.data && channelData.data.length > 0 ? channelData.data[0] : null;
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+        if (!channel) {
+            return res.status(404).json({ error: 'Channel not found.', details: `No channel found for slug: ${slug}` });
+        }
+
+        // Calculate account age (assuming channel_created exists; fallback to start_time)
+        let createdDate = channel.created_at || channel.stream?.start_time;
+        let accountAge = null;
+        let formattedCreatedDate = null;
+
+        if (createdDate && createdDate !== '0001-01-01T00:00:00Z') {
+            const createdMoment = moment(createdDate);
+            formattedCreatedDate = createdMoment.format('MMMM D, YYYY');
+            const now = moment();
+            const years = now.diff(createdMoment, 'years');
+            now.subtract(years, 'years');
+            const months = now.diff(createdMoment, 'months');
+            accountAge = years > 0 ? `${years} year${years > 1 ? 's' : ''}${months > 0 ? `, ${months} month${months > 1 ? 's' : ''}` : ''}` : `${months} month${months > 1 ? 's' : ''}`;
+        }
+
+        // Format start_time
+        const startTime = channel.stream?.start_time && channel.stream.start_time !== '0001-01-01T00:00:00Z'
+            ? moment(channel.stream.start_time).format('MMMM D, YYYY')
+            : null;
+
+        res.json({
+            profile_image: channel.banner_picture || null,
+            follower_count: channel.followers_count || null,
+            channel_created: formattedCreatedDate || null,
+            account_age: accountAge || null,
+            verification_status: channel.verified || false,
+            banned_status: channel.is_banned || false,
+            channel_slug: channel.slug || slug,
+            channel_description: channel.channel_description || null,
+            broadcaster_user_id: channel.broadcaster_user_id || null,
+            stream_title: channel.stream_title || null,
+            is_live: channel.stream?.is_live || false,
+            is_mature: channel.stream?.is_mature || false,
+            viewer_count: channel.stream?.viewer_count || null,
+            stream_start_time: startTime || null
+        });
+    } catch (error) {
+        res.status(error.response?.status || 500).json({
+            error: 'Failed to fetch profile.',
+            details: error.response?.data?.error || error.message,
+            reference: error.response?.data?.reference || 'N/A'
+        });
+    }
 });
 
 app.listen(port, () => {
-  console.log(`Kick Server running on port ${port}`);
+    console.log(`Kick API backend running on port ${port}`);
 });

@@ -43,7 +43,7 @@ app.get('/kick-profile', async (req, res) => {
         const accessToken = await getAppAccessToken();
 
         // Step 2: Call the Kick public API to fetch profile data by slug
-        const response = await axios.get(`https://api.kick.com/public/v1/channels/${slug}`, {
+        const response = await axios.get(`https://api.kick.com/public/v2/channels/${slug}`, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,  // Use the Bearer token
                 'Accept': '*/*',

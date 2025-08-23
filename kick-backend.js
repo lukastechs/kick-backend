@@ -142,7 +142,7 @@ app.get('/kick-profile', async (req, res) => {
     const ageDays = channel.age_days || calculateAgeDays(createdAt);
 
     res.json({
-      profile_image: channel.banner_picture || null,
+      profile_image: channel.user?.profile_pic || null,
       follower_count: channel.followers_count || null,
       channel_created: formattedCreatedDate,
       account_age: accountAge,

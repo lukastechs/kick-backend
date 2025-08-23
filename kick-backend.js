@@ -1,5 +1,5 @@
 const express = require('express');
-const axios = require('axios');
+const cloudscraper = require('cloudscraper');
 const dotenv = require('dotenv');
 const qs = require('querystring');
 
@@ -8,31 +8,32 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
-const KICK_API_URL = 'https://api.kick.com/public/v1/channels/'; // Try v1 first
-// const KICK_API_URL = 'https://kick.com/api/v2/channels/'; // Fallback if v1 fails
+const KICK_API_URL = 'https://api.kick.com/public/v1/channels/';
+// const KICK_API_URL = 'https://kick.com/api/v2/channels/'; // Fallback
 const KICK_OAUTH_URL = 'https://id.kick.com/oauth/token';
 
 async function getAppAccessToken() {
     try {
-        const response = await axios.post(KICK_OAUTH_URL, qs.stringify({
-            grant_type: 'client_credentials',
-            client_id: process.env.KICK_CLIENT_ID || 'YOUR_CLIENT_ID_HERE',
-            client_secret: process.env.KICK_CLIENT_SECRET || 'YOUR_CLIENT_SECRET_HERE'
-        }), {
+        const response = await cloudscraper.post(KICK_OAUTH_URL, {
+            body: qs.stringify({
+                grant_type: 'client_credentials',
+                client_id: process.env.KICK_CLIENT_ID || 'YOUR_CLIENT_ID_HERE',
+                client_secret: process.env.KICK_CLIENT_SECRET || 'YOUR_CLIENT_SECRET_HERE'
+            }),
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
         });
 
-        const data = response.data;
-        console.log('Access Token:', data.access_token); // Debug token
+        const data = JSON.parse(response);
+        console.log('Access Token:', data.access_token);
         if (!data.access_token) {
             throw new Error('No access token received');
         }
         return data.access_token;
     } catch (error) {
-        console.error('Error fetching App Access Token:', error.response?.data || error.message);
+        console.error('Error fetching App Access Token:', error);
         throw error;
     }
 }
@@ -50,7 +51,7 @@ app.get('/kick-profile', async (req, res) => {
 
     try {
         const accessToken = await getAppAccessToken();
-        const response = await axios.get(`${KICK_API_URL}${slug}`, {
+        const response = await cloudscraper.get(`${KICK_API_URL}${slug}`, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
                 'Accept': '*/*',
@@ -61,8 +62,8 @@ app.get('/kick-profile', async (req, res) => {
             }
         });
 
-        const data = response.data.data[0]; // Access first item in data array
-        console.log('API Response:', data); // Debug response
+        const data = JSON.parse(response).data[0];
+        console.log('API Response:', data);
         res.json({
             profile_image: data.banner_picture || null,
             follower_count: data.followers_count || null,
@@ -78,10 +79,10 @@ app.get('/kick-profile', async (req, res) => {
             viewer_count: data.stream?.viewer_count || null
         });
     } catch (error) {
-        console.error('Error fetching profile:', error.response?.data || error.message);
+        console.error('Error fetching profile:', error);
         res.status(500).json({
             error: 'Failed to fetch profile.',
-            details: error.response?.data?.error || error.message,
+            details: error.message,
             reference: error.response?.data?.reference || 'N/A'
         });
     }
